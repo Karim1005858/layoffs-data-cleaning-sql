@@ -1,0 +1,129 @@
+/* =========================================================
+   1. CREATE STAGING TABLE (copy raw data)
+   ========================================================= */
+
+CREATE TABLE layoff_staging
+LIKE world_layoff.layoffs;
+
+INSERT INTO layoff_staging
+SELECT *
+FROM world_layoff.layoffs;
+
+
+
+/* =========================================================
+   2. REMOVE DUPLICATES
+   ========================================================= */
+
+-- Identify duplicates
+WITH duplicate_cte AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY company, location, industry,
+                            total_laid_off, percentage_laid_off,
+                            `date`, stage, country, funds_raised_millions
+           ) AS rn
+    FROM layoff_staging
+)
+SELECT *
+FROM duplicate_cte
+WHERE rn > 1;
+
+
+-- Create new table with row numbers
+CREATE TABLE world_layoff.layoff_staging2 (
+  company TEXT,
+  location TEXT,
+  industry TEXT,
+  total_laid_off INT,
+  percentage_laid_off TEXT,
+  `date` TEXT,
+  stage TEXT,
+  country TEXT,
+  funds_raised_millions INT,
+  row_num INT
+);
+
+-- Insert data with row_number
+INSERT INTO world_layoff.layoff_staging2
+SELECT *,
+       ROW_NUMBER() OVER (
+           PARTITION BY company, location, industry,
+                        total_laid_off, percentage_laid_off,
+                        `date`, stage, country, funds_raised_millions
+       ) AS row_num
+FROM layoff_staging;
+
+-- Delete duplicates (keep first occurrence)
+DELETE
+FROM world_layoff.layoff_staging2
+WHERE row_num > 1;
+
+
+
+/* =========================================================
+   3. STANDARDIZATION
+   ========================================================= */
+
+-- Remove leading/trailing spaces from company
+UPDATE world_layoff.layoff_staging2
+SET company = TRIM(company);
+
+-- Standardize industry values (e.g., crypto variations)
+UPDATE world_layoff.layoff_staging2
+SET industry = 'crypto'
+WHERE industry LIKE 'crypto%';
+
+-- Clean country values (remove trailing period)
+UPDATE world_layoff.layoff_staging2
+SET country = TRIM(TRAILING '.' FROM country)
+WHERE country LIKE 'United States%';
+
+
+
+/* =========================================================
+   4. CONVERT DATE FORMAT
+   ========================================================= */
+
+-- Convert string to DATE format
+UPDATE world_layoff.layoff_staging2
+SET `date` = STR_TO_DATE(`date`, '%m/%d/%Y');
+
+-- Change column type to DATE
+ALTER TABLE world_layoff.layoff_staging2
+MODIFY COLUMN `date` DATE;
+
+
+
+/* =========================================================
+   5. HANDLE NULL VALUES
+   ========================================================= */
+
+-- Convert empty strings to NULL
+UPDATE world_layoff.layoff_staging2
+SET industry = NULL
+WHERE industry = '';
+
+-- Fill NULL values using self join
+UPDATE world_layoff.layoff_staging2 t1
+JOIN world_layoff.layoff_staging2 t2
+    ON t1.company = t2.company
+SET t1.industry = t2.industry
+WHERE t1.industry IS NULL
+AND t2.industry IS NOT NULL;
+
+-- Remove rows with no useful layoff data
+DELETE
+FROM world_layoff.layoff_staging2
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
+
+
+
+/* =========================================================
+   6. FINAL CLEANUP
+   ========================================================= */
+
+-- Drop helper column
+ALTER TABLE world_layoff.layoff_staging2
+DROP COLUMN row_num;
